@@ -1,4 +1,5 @@
 #include "image_util.h"
+#include "webp_codec.h"
 
 #include <shlwapi.h>
 #include <algorithm>
@@ -37,12 +38,14 @@ const wchar_t* MimeFromExt(const std::wstring& ext)
     if (ext == L"bmp") return L"image/bmp";
     if (ext == L"gif") return L"image/gif";
     if (ext == L"tif" || ext == L"tiff") return L"image/tiff";
+    if (ext == L"webp") return L"image/webp";
     return nullptr;
 }
 
 bool HasAlphaFormat(const std::wstring& ext)
 {
-    return ext == L"png" || ext == L"gif" || ext == L"tif" || ext == L"tiff";
+    return ext == L"png" || ext == L"gif" || ext == L"tif" || ext == L"tiff" ||
+           ext == L"webp";
 }
 
 int GetEncoderClsid(const wchar_t* mime, CLSID* clsid)
@@ -86,6 +89,9 @@ bool ImgUtil_IsSupportedFile(const std::wstring& path)
 
 std::unique_ptr<Bitmap> ImgUtil_LoadBitmap(const std::wstring& path)
 {
+    if (ExtensionOf(path) == L"webp")
+        return WebPCodec_Load(path);
+
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -134,6 +140,19 @@ std::unique_ptr<Bitmap> ImgUtil_LoadBitmap(const std::wstring& path)
 bool ImgUtil_LoadInfo(const std::wstring& path, int* width, int* height,
                       double* dpiX, double* dpiY)
 {
+    if (ExtensionOf(path) == L"webp")
+    {
+        int w = 0;
+        int h = 0;
+        if (!WebPCodec_LoadInfo(path, &w, &h))
+            return false;
+        if (width) *width = w;
+        if (height) *height = h;
+        if (dpiX) *dpiX = 96.0;
+        if (dpiY) *dpiY = 96.0;
+        return true;
+    }
+
     Bitmap bmp(path.c_str(), FALSE);
     if (bmp.GetLastStatus() != Ok)
         return false;
@@ -222,15 +241,16 @@ bool ImgUtil_SaveAs(const std::wstring& dstPath, Bitmap* src, const RectF& crop,
     }
 
     std::wstring ext = ExtensionOf(dstPath);
+    bool isWebP = (ext == L"webp");
     const wchar_t* mime = MimeFromExt(ext);
     if (!mime)
     {
-        if (err) *err = L"対応していない保存形式です (.png/.jpg/.bmp/.gif/.tif)。";
+        if (err) *err = L"対応していない保存形式です (.png/.jpg/.bmp/.gif/.tif/.webp)。";
         return false;
     }
 
-    CLSID clsid;
-    if (GetEncoderClsid(mime, &clsid) < 0)
+    CLSID clsid{};
+    if (!isWebP && GetEncoderClsid(mime, &clsid) < 0)
     {
         if (err) *err = L"画像エンコーダが見つかりません。";
         return false;
@@ -273,6 +293,9 @@ bool ImgUtil_SaveAs(const std::wstring& dstPath, Bitmap* src, const RectF& crop,
         if (dpiY > 100000) dpiY = 100000;
         dst.SetResolution((REAL)dpiX, (REAL)dpiY);
     }
+
+    if (isWebP)
+        return WebPCodec_Save(dstPath, &dst, 92.0f, err);
 
     EncoderParameters encParams{};
     if (wcscmp(mime, L"image/jpeg") == 0)

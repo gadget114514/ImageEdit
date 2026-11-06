@@ -1,7 +1,7 @@
 ; ImageEdit installer script for Inno Setup 6
 
 #define MyAppName "ImageEdit"
-#define MyAppVersion "0.9.0"
+#define MyAppVersion "0.9.1"
 #define MyAppPublisher "gadget114514"
 #define MyAppExeName "ImageEdit.exe"
 #define BuildDir "..\build\Release"

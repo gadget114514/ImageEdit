@@ -1131,7 +1131,7 @@ void DoSave(EditorState* st)
     std::wstring filter =
         L"PNG (*.png)\0*.png\0JPEG (*.jpg;*.jpeg)\0*.jpg;*.jpeg\0"
         L"BMP (*.bmp)\0*.bmp\0GIF (*.gif)\0*.gif\0TIFF (*.tif;*.tiff)\0*.tif;*.tiff\0"
-        L"すべてのファイル\0*.*\0\0";
+        L"WebP (*.webp)\0*.webp\0すべてのファイル\0*.*\0\0";
 
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);

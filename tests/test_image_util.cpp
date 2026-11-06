@@ -129,6 +129,39 @@ int wmain()
         DeleteFileW(s.c_str());
     }
 
+    Check(ImgUtil_IsSupportedFile(L"sample.webp"), L"webp is supported");
+
+    {
+        std::wstring s = dir + L"imgedit_test_out.webp";
+        DeleteFileW(s.c_str());
+        std::unique_ptr<Bitmap> bmp = ImgUtil_LoadBitmap(srcPath);
+        std::wstring err;
+        bool ok = bmp && ImgUtil_SaveAs(s, bmp.get(), RectF(0, 0, 400, 300),
+                                        400, 300, 96, 96, &err);
+        Check(ok, L"save webp (err=%s)", err.c_str());
+
+        int ww = 0, wh = 0;
+        double wdx = 0, wdy = 0;
+        Check(ImgUtil_LoadInfo(s, &ww, &wh, &wdx, &wdy), L"LoadInfo webp");
+        Check(ww == 400 && wh == 300, L"webp size 400x300 (got %dx%d)", ww, wh);
+
+        std::unique_ptr<Bitmap> loaded = ImgUtil_LoadBitmap(s);
+        Check(loaded != nullptr, L"LoadBitmap webp");
+        if (loaded)
+        {
+            Color c;
+            loaded->GetPixel(50, 50, &c);
+            Check(c.GetR() > 200 && c.GetG() < 60 && c.GetB() < 60,
+                  L"webp red pixel preserved (r=%d g=%d b=%d)",
+                  c.GetR(), c.GetG(), c.GetB());
+            loaded->GetPixel(350, 50, &c);
+            Check(c.GetB() > 200 && c.GetR() < 60 && c.GetG() < 60,
+                  L"webp blue pixel preserved (r=%d g=%d b=%d)",
+                  c.GetR(), c.GetG(), c.GetB());
+        }
+        DeleteFileW(s.c_str());
+    }
+
     DeleteFileW(srcPath.c_str());
     DeleteFileW(outPath.c_str());
 

@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <shobjidl.h>
 #include <algorithm>
 #include <cstdio>
@@ -30,14 +31,15 @@ namespace {
 
 enum {
     IDC_BTN_OPEN = 2001, IDC_BTN_ADD, IDC_BTN_EDIT, IDC_BTN_DEL,
-    IDC_BTN_REFRESH, IDC_BTN_RELOAD, IDC_LIST, IDM_EXIT = 2100, IDM_EDIT,
-    IDM_REVEAL, IDM_REMOVE
+    IDC_BTN_REFRESH, IDC_BTN_RELOAD, IDC_LIST, IDC_CMB_SORT = 2010,
+    IDM_EXIT = 2100, IDM_EDIT, IDM_REVEAL, IDM_REMOVE
 };
 
 struct ListItem {
     std::wstring path;
     int width = 0, height = 0;
     double dpiX = 96, dpiY = 96;
+    unsigned long long created = 0;
     int imageIndex = -1;
 };
 
@@ -47,11 +49,13 @@ HWND g_list = nullptr;
 HWND g_status = nullptr;
 HWND g_btnOpen = nullptr, g_btnAdd = nullptr, g_btnEdit = nullptr;
 HWND g_btnDel = nullptr, g_btnRefresh = nullptr, g_btnReload = nullptr;
+HWND g_lblSort = nullptr, g_cmbSort = nullptr;
 HIMAGELIST g_himl = nullptr;
 HFONT g_font = nullptr;
 HACCEL g_accel = nullptr;
 UINT g_dpi = 96;
 int g_thumb = 160;
+int g_sortMode = 0;
 std::vector<ListItem> g_items;
 std::vector<std::wstring> g_folders;
 std::wstring g_lastFolder;
@@ -59,6 +63,19 @@ std::wstring g_lastFolder;
 const wchar_t* kRegPath = L"Software\\ImageEdit";
 
 int Sc(int v) { return MulDiv(v, (int)g_dpi, 96); }
+
+void ApplySort();
+
+unsigned long long GetCreationTime(const std::wstring& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        return 0;
+    ULARGE_INTEGER li;
+    li.LowPart = fad.ftCreationTime.dwLowDateTime;
+    li.HighPart = fad.ftCreationTime.dwHighDateTime;
+    return li.QuadPart;
+}
 
 std::wstring FileNameOf(const std::wstring& p)
 {
@@ -112,6 +129,16 @@ std::wstring RegGetString(const wchar_t* name)
     return buf;
 }
 
+DWORD RegGetDword(const wchar_t* name, DWORD def)
+{
+    DWORD val = def;
+    DWORD size = sizeof(val);
+    if (RegGetValueW(HKEY_CURRENT_USER, kRegPath, name, RRF_RT_REG_DWORD,
+                     nullptr, &val, &size) != ERROR_SUCCESS)
+        return def;
+    return val;
+}
+
 std::vector<std::wstring> RegGetMultiSz(const wchar_t* name)
 {
     std::vector<std::wstring> out;
@@ -163,6 +190,10 @@ void SaveState()
     RegSetValueExW(key, L"Folders", 0, REG_MULTI_SZ,
                    (const BYTE*)folders.data(),
                    (DWORD)(folders.size() * sizeof(wchar_t)));
+
+    DWORD sortMode = (DWORD)g_sortMode;
+    RegSetValueExW(key, L"SortMode", 0, REG_DWORD,
+                   (const BYTE*)&sortMode, sizeof(sortMode));
     RegCloseKey(key);
 }
 
@@ -250,6 +281,7 @@ void MainAddFile(const std::wstring& path)
     item.height = h;
     item.dpiX = dx;
     item.dpiY = dy;
+    item.created = GetCreationTime(path);
     item.imageIndex = imgIdx;
     g_items.push_back(item);
 
@@ -292,6 +324,7 @@ void MainAddFolder(const std::wstring& dir)
     HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
     for (const auto& f : files)
         MainAddFile(f);
+    ApplySort();
     SetCursor(old);
     SaveState();
 }
@@ -314,6 +347,49 @@ void RebuildList()
     SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_list, nullptr, TRUE);
     SetStatusCount();
+}
+
+bool NameLess(const ListItem& a, const ListItem& b)
+{
+    int c = StrCmpLogicalW(FileNameOf(a.path).c_str(),
+                           FileNameOf(b.path).c_str());
+    if (c == 0)
+        c = _wcsicmp(a.path.c_str(), b.path.c_str());
+    return c < 0;
+}
+
+void ApplySort()
+{
+    switch (g_sortMode)
+    {
+    case 1:
+        std::stable_sort(g_items.begin(), g_items.end(),
+                         [](const ListItem& a, const ListItem& b)
+                         { return NameLess(b, a); });
+        break;
+    case 2:
+        std::stable_sort(g_items.begin(), g_items.end(),
+                         [](const ListItem& a, const ListItem& b)
+                         {
+                             if (a.created != b.created)
+                                 return a.created > b.created;
+                             return NameLess(a, b);
+                         });
+        break;
+    case 3:
+        std::stable_sort(g_items.begin(), g_items.end(),
+                         [](const ListItem& a, const ListItem& b)
+                         {
+                             if (a.created != b.created)
+                                 return a.created < b.created;
+                             return NameLess(a, b);
+                         });
+        break;
+    default:
+        std::stable_sort(g_items.begin(), g_items.end(), NameLess);
+        break;
+    }
+    RebuildList();
 }
 
 void MainRemoveSelected()
@@ -362,9 +438,13 @@ void MainRefresh()
         it.height = h;
         it.dpiX = dx;
         it.dpiY = dy;
+        it.created = GetCreationTime(it.path);
     }
     SetCursor(old);
-    InvalidateRect(g_list, nullptr, TRUE);
+    if (g_sortMode >= 2)
+        ApplySort();
+    else
+        InvalidateRect(g_list, nullptr, TRUE);
 }
 
 void MainReloadFolders()
@@ -458,7 +538,7 @@ std::vector<std::wstring> PickFiles(HWND owner)
                                    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))))
     {
         COMDLG_FILTERSPEC filters[] = {
-            { L"画像ファイル", L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff" },
+            { L"画像ファイル", L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.webp" },
             { L"すべてのファイル", L"*.*" },
         };
         dlg->SetFileTypes(2, filters);
@@ -528,6 +608,10 @@ void MainLayout(HWND hwnd)
     place(g_btnDel, Sc(90));
     place(g_btnRefresh, Sc(100));
     place(g_btnReload, Sc(110));
+    x += Sc(12);
+    place(g_lblSort, Sc(64));
+    if (g_cmbSort)
+        MoveWindow(g_cmbSort, x, y, Sc(160), Sc(200), TRUE);
 
     int listTop = y + ch + pad;
     MoveWindow(g_list, 0, listTop, rc.right,
@@ -558,6 +642,18 @@ void CreateMainControls(HWND hwnd)
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 10, 10,
         hwnd, (HMENU)IDC_BTN_RELOAD, g_inst, nullptr);
 
+    g_lblSort = CreateWindowExW(0, WC_STATICW, L"並べ替え",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 10, 10,
+        hwnd, nullptr, g_inst, nullptr);
+    g_cmbSort = CreateWindowExW(0, WC_COMBOBOXW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+        0, 0, 10, 10, hwnd, (HMENU)IDC_CMB_SORT, g_inst, nullptr);
+    SendMessageW(g_cmbSort, CB_ADDSTRING, 0, (LPARAM)L"名前順（昇順）");
+    SendMessageW(g_cmbSort, CB_ADDSTRING, 0, (LPARAM)L"名前順（降順）");
+    SendMessageW(g_cmbSort, CB_ADDSTRING, 0, (LPARAM)L"作成日時（新しい順）");
+    SendMessageW(g_cmbSort, CB_ADDSTRING, 0, (LPARAM)L"作成日時（古い順）");
+    SendMessageW(g_cmbSort, CB_SETCURSEL, g_sortMode, 0);
+
     g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_ICON | LVS_AUTOARRANGE |
         LVS_SHOWSELALWAYS,
@@ -574,7 +670,8 @@ void CreateMainControls(HWND hwnd)
     ListView_SetIconSpacing(g_list, g_thumb + Sc(24), g_thumb + Sc(52));
 
     HWND controls[] = { g_btnOpen, g_btnAdd, g_btnEdit, g_btnDel,
-                        g_btnRefresh, g_btnReload, g_list, g_status };
+                        g_btnRefresh, g_btnReload, g_lblSort, g_cmbSort,
+                        g_list, g_status };
     for (HWND h : controls)
         SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
 
@@ -680,6 +777,7 @@ void HandleDrop(HWND hwnd, HDROP drop)
         MainAddFile(f);
     for (const auto& d : dirs)
         MainAddFolder(d);
+    ApplySort();
     SetCursor(old);
     SaveState();
 }
@@ -719,7 +817,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                              L"Yu Gothic UI");
         HWND controls[] = { g_btnOpen, g_btnAdd, g_btnEdit, g_btnDel,
-                            g_btnRefresh, g_btnReload, g_list, g_status };
+                            g_btnRefresh, g_btnReload, g_lblSort, g_cmbSort,
+                            g_list, g_status };
         for (HWND h : controls)
             SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
         RECT* pr = (RECT*)lParam;
@@ -734,6 +833,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_COMMAND:
+        if ((HWND)lParam == g_cmbSort && HIWORD(wParam) == CBN_SELCHANGE)
+        {
+            int sel = (int)SendMessageW(g_cmbSort, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel <= 3)
+            {
+                g_sortMode = sel;
+                ApplySort();
+                SaveState();
+            }
+            return 0;
+        }
         switch (LOWORD(wParam))
         {
         case IDC_BTN_OPEN:
@@ -747,6 +857,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             for (const auto& f : PickFiles(hwnd))
                 MainAddFile(f);
+            ApplySort();
+            SaveState();
             return 0;
         }
         case IDC_BTN_EDIT:
@@ -912,6 +1024,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     UpdateWindow(g_main);
 
     g_lastFolder = RegGetString(L"LastFolder");
+    g_sortMode = (int)RegGetDword(L"SortMode", 0);
+    if (g_sortMode < 0 || g_sortMode > 3)
+        g_sortMode = 0;
+    if (g_cmbSort)
+        SendMessageW(g_cmbSort, CB_SETCURSEL, g_sortMode, 0);
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -956,6 +1073,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
             EnsureFoldersFromItems();
         SetCursor(old);
     }
+
+    ApplySort();
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
