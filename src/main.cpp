@@ -1,9 +1,11 @@
 #include "app.h"
+#include "drag_source.h"
 #include "editor.h"
 #include "image_util.h"
 
 #include <windows.h>
 #include <commctrl.h>
+#include <ole2.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
@@ -756,7 +758,7 @@ void CreateMainControls(HWND hwnd)
         SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
 
     SendMessageW(g_status, SB_SETTEXTW, 1,
-                 (LPARAM)L"ダブルクリックで編集 / 画像のD&Dでコピー / F2で名前変更");
+                 (LPARAM)L"ダブルクリックで編集 / 一覧へD&Dでコピー / 一覧からD&Dで他アプリへ / F2で名前変更");
 }
 
 void BuildMenu(HWND hwnd)
@@ -1036,6 +1038,35 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             case NM_RCLICK:
                 ShowListContextMenu(hwnd);
                 return 0;
+            case LVN_BEGINDRAG:
+            {
+                auto nv = (NMLISTVIEW*)lParam;
+                if (nv->iItem < 0)
+                    return 0;
+                if (!(ListView_GetItemState(g_list, nv->iItem, LVIS_SELECTED) &
+                      LVIS_SELECTED))
+                    ListView_SetItemState(g_list, nv->iItem,
+                                          LVIS_SELECTED | LVIS_FOCUSED,
+                                          LVIS_SELECTED | LVIS_FOCUSED);
+
+                std::vector<std::wstring> paths;
+                int sel = -1;
+                while ((sel = ListView_GetNextItem(g_list, sel, LVNI_SELECTED)) >= 0)
+                {
+                    LVITEMW lvi{};
+                    lvi.mask = LVIF_PARAM;
+                    lvi.iItem = sel;
+                    if (ListView_GetItem(g_list, &lvi))
+                    {
+                        int idx = (int)lvi.lParam;
+                        if (idx >= 0 && idx < (int)g_items.size())
+                            paths.push_back(g_items[idx].path);
+                    }
+                }
+                if (!paths.empty())
+                    ImageEdit_DoDragDrop(g_main, paths);
+                return 0;
+            }
             case LVN_ENDLABELEDIT:
             {
                 auto di = (NMLVDISPINFOW*)lParam;
@@ -1184,7 +1215,7 @@ static void SetProcessDpiAwareness()
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 {
     SetProcessDpiAwareness();
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    OleInitialize(nullptr);
 
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
@@ -1211,7 +1242,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     if (!RegisterClassExW(&wc))
     {
         Gdiplus::GdiplusShutdown(gdipToken);
-        CoUninitialize();
+        OleUninitialize();
         return 1;
     }
 
@@ -1224,7 +1255,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     if (!g_main)
     {
         Gdiplus::GdiplusShutdown(gdipToken);
-        CoUninitialize();
+        OleUninitialize();
         return 1;
     }
 
@@ -1295,6 +1326,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
     }
 
     Gdiplus::GdiplusShutdown(gdipToken);
-    CoUninitialize();
+    OleUninitialize();
     return (int)msg.wParam;
 }

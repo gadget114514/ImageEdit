@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ImageEdit VERSION 0.9.2 LANGUAGES CXX)
+project(ImageEdit VERSION 0.9.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +38,7 @@ target_link_libraries(imagecore PUBLIC webp)
 target_compile_definitions(imagecore PUBLIC ${APP_DEFS})
 target_compile_options(imagecore PRIVATE /utf-8 /W4 /EHsc /permissive-)
 
-add_executable(ImageEdit WIN32 src/main.cpp src/editor.cpp)
+add_executable(ImageEdit WIN32 src/main.cpp src/editor.cpp src/drag_source.cpp)
 target_link_libraries(ImageEdit PRIVATE
   imagecore user32 gdi32 gdiplus comctl32 comdlg32 shlwapi shell32 ole32 uuid)
 target_compile_options(ImageEdit PRIVATE /utf-8 /W4 /EHsc /permissive-)
