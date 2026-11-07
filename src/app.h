@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #define WM_APP_THUMBS_CHANGED (WM_APP + 1)
+#define WM_APP_RESORT (WM_APP + 2)
 
 inline UINT GetDpiForWindowSafe(HWND hwnd)
 {

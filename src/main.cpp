@@ -32,7 +32,7 @@ namespace {
 enum {
     IDC_BTN_OPEN = 2001, IDC_BTN_ADD, IDC_BTN_EDIT, IDC_BTN_DEL,
     IDC_BTN_REFRESH, IDC_BTN_RELOAD, IDC_LIST, IDC_CMB_SORT = 2010,
-    IDM_EXIT = 2100, IDM_EDIT, IDM_REVEAL, IDM_REMOVE
+    IDM_EXIT = 2100, IDM_EDIT, IDM_REVEAL, IDM_REMOVE, IDM_RENAME
 };
 
 struct ListItem {
@@ -59,6 +59,7 @@ int g_sortMode = 0;
 std::vector<ListItem> g_items;
 std::vector<std::wstring> g_folders;
 std::wstring g_lastFolder;
+std::wstring g_renameText;
 
 const wchar_t* kRegPath = L"Software\\ImageEdit";
 
@@ -80,6 +81,54 @@ unsigned long long GetCreationTime(const std::wstring& path)
 std::wstring FileNameOf(const std::wstring& p)
 {
     return fs::path(p).filename().wstring();
+}
+
+bool SamePath(const std::wstring& a, const std::wstring& b)
+{
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+std::wstring CurrentImageFolder()
+{
+    if (!g_lastFolder.empty())
+        return g_lastFolder;
+    if (!g_folders.empty())
+        return g_folders.front();
+    for (auto it = g_items.rbegin(); it != g_items.rend(); ++it)
+    {
+        std::wstring parent = fs::path(it->path).parent_path().wstring();
+        if (!parent.empty())
+            return parent;
+    }
+    return L"";
+}
+
+std::wstring UniqueCopyPath(const std::wstring& dir, const std::wstring& srcPath)
+{
+    fs::path sp(srcPath);
+    std::wstring stem = sp.stem().wstring();
+    std::wstring ext = sp.extension().wstring();
+    std::wstring dest = dir + L"\\" + sp.filename().wstring();
+    int n = 1;
+    while (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        wchar_t suffix[32];
+        swprintf_s(suffix, L" (%d)", n++);
+        dest = dir + L"\\" + stem + suffix + ext;
+    }
+    return dest;
+}
+
+bool IsValidFileName(const std::wstring& name)
+{
+    if (name.empty() || name == L"." || name == L"..")
+        return false;
+    if (name.back() == L' ' || name.back() == L'.')
+        return false;
+    for (wchar_t c : name)
+        if (c < 32 || wcschr(L"<>:\"/\\|?*", c))
+            return false;
+    return true;
 }
 
 int FindItemByPath(const std::wstring& path)
@@ -249,6 +298,37 @@ int GetSelectedItemIndex()
     if (idx < 0 || idx >= (int)g_items.size())
         return -1;
     return idx;
+}
+
+int ListPositionOfIndex(int itemIndex)
+{
+    int n = ListView_GetItemCount(g_list);
+    for (int i = 0; i < n; i++)
+    {
+        LVITEMW lvi{};
+        lvi.mask = LVIF_PARAM;
+        lvi.iItem = i;
+        if (ListView_GetItem(g_list, &lvi) && (int)lvi.lParam == itemIndex)
+            return i;
+    }
+    return -1;
+}
+
+void MainRenameSelected()
+{
+    int idx = GetSelectedItemIndex();
+    if (idx < 0)
+    {
+        MessageBoxW(g_main, L"名前を変更する画像を選択してください。", L"ImageEdit",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    int pos = ListPositionOfIndex(idx);
+    if (pos < 0)
+        return;
+    SetFocus(g_list);
+    ListView_EnsureVisible(g_list, pos, FALSE);
+    ListView_EditLabel(g_list, pos);
 }
 
 void MainAddFile(const std::wstring& path)
@@ -656,7 +736,7 @@ void CreateMainControls(HWND hwnd)
 
     g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_ICON | LVS_AUTOARRANGE |
-        LVS_SHOWSELALWAYS,
+        LVS_SHOWSELALWAYS | LVS_EDITLABELS,
         0, 0, 10, 10, hwnd, (HMENU)IDC_LIST, g_inst, nullptr);
 
     g_status = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
@@ -676,7 +756,7 @@ void CreateMainControls(HWND hwnd)
         SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
 
     SendMessageW(g_status, SB_SETTEXTW, 1,
-                 (LPARAM)L"ダブルクリックで編集 / 画像をドラッグ＆ドロップでも追加できます");
+                 (LPARAM)L"ダブルクリックで編集 / 画像のD&Dでコピー / F2で名前変更");
 }
 
 void BuildMenu(HWND hwnd)
@@ -693,6 +773,7 @@ void BuildMenu(HWND hwnd)
     HMENU edit = CreatePopupMenu();
     AppendMenuW(edit, MF_STRING, IDC_BTN_EDIT, L"編集(&E)\tEnter");
     AppendMenuW(edit, MF_STRING, IDM_REVEAL, L"エクスプローラーで表示(&R)");
+    AppendMenuW(edit, MF_STRING, IDM_RENAME, L"名前を変更(&N)\tF2");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, IDC_BTN_DEL, L"一覧から削除(&D)\tDel");
     AppendMenuW(edit, MF_STRING, IDC_BTN_REFRESH, L"サムネイル更新(&U)\tF5");
@@ -705,6 +786,7 @@ void BuildMenu(HWND hwnd)
         { FVIRTKEY | FCONTROL, 'I', IDC_BTN_ADD },
         { FVIRTKEY, VK_F5, IDC_BTN_REFRESH },
         { FVIRTKEY, VK_F6, IDC_BTN_RELOAD },
+        { FVIRTKEY, VK_F2, IDM_RENAME },
         { FVIRTKEY, VK_DELETE, IDC_BTN_DEL },
         { FVIRTKEY, VK_RETURN, IDC_BTN_EDIT },
     };
@@ -727,6 +809,7 @@ void ShowListContextMenu(HWND hwnd)
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_EDIT, L"編集(&E)");
     AppendMenuW(m, MF_STRING, IDM_REVEAL, L"エクスプローラーで表示(&R)");
+    AppendMenuW(m, MF_STRING, IDM_RENAME, L"名前を変更(&N)");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_REMOVE, L"一覧から削除(&D)");
     UINT cmd = TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0,
@@ -747,6 +830,9 @@ void ShowListContextMenu(HWND hwnd)
     }
     case IDM_REMOVE:
         MainRemoveSelected();
+        break;
+    case IDM_RENAME:
+        MainRenameSelected();
         break;
     }
 }
@@ -773,13 +859,59 @@ void HandleDrop(HWND hwnd, HDROP drop)
     DragFinish(drop);
 
     HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-    for (const auto& f : files)
-        MainAddFile(f);
     for (const auto& d : dirs)
         MainAddFolder(d);
+
+    int copied = 0;
+    int failed = 0;
+    if (!files.empty())
+    {
+        std::wstring target = CurrentImageFolder();
+        if (target.empty())
+        {
+            SetCursor(old);
+            MessageBoxW(g_main,
+                        L"コピー先のイメージフォルダがありません。\n"
+                        L"先に「イメージフォルダを開く」でフォルダを開いてください。",
+                        L"ImageEdit", MB_ICONINFORMATION);
+        }
+        else
+        {
+            for (const auto& f : files)
+            {
+                if (!ImgUtil_IsSupportedFile(f))
+                    continue;
+                std::wstring parent = fs::path(f).parent_path().wstring();
+                if (SamePath(parent, target))
+                {
+                    MainAddFile(f);
+                    continue;
+                }
+                std::wstring dest = UniqueCopyPath(target, f);
+                if (CopyFileW(f.c_str(), dest.c_str(), TRUE))
+                {
+                    MainAddFile(dest);
+                    copied++;
+                }
+                else
+                {
+                    failed++;
+                }
+            }
+        }
+    }
+
     ApplySort();
     SetCursor(old);
     SaveState();
+
+    if (failed > 0)
+    {
+        wchar_t msg[160];
+        swprintf_s(msg, L"%d 件中 %d 件のコピーに失敗しました。", copied + failed,
+                   failed);
+        MessageBoxW(g_main, msg, L"ImageEdit", MB_ICONWARNING);
+    }
 }
 
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -882,6 +1014,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 RevealInExplorer(g_items[idx].path);
             return 0;
         }
+        case IDM_RENAME:
+            MainRenameSelected();
+            return 0;
         case IDM_EXIT:
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;
@@ -901,6 +1036,75 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             case NM_RCLICK:
                 ShowListContextMenu(hwnd);
                 return 0;
+            case LVN_ENDLABELEDIT:
+            {
+                auto di = (NMLVDISPINFOW*)lParam;
+                if (!di->item.pszText || !di->item.pszText[0])
+                    return FALSE;
+
+                LVITEMW lvi{};
+                lvi.mask = LVIF_PARAM;
+                lvi.iItem = di->item.iItem;
+                if (!ListView_GetItem(g_list, &lvi))
+                    return FALSE;
+                int idx = (int)lvi.lParam;
+                if (idx < 0 || idx >= (int)g_items.size())
+                    return FALSE;
+
+                std::wstring oldPath = g_items[idx].path;
+                fs::path op(oldPath);
+                std::wstring oldExt = op.extension().wstring();
+                std::wstring newName = di->item.pszText;
+
+                if (!IsValidFileName(newName))
+                {
+                    MessageBoxW(g_main,
+                                L"ファイル名に使用できない文字が含まれています。",
+                                L"ImageEdit", MB_ICONWARNING);
+                    return FALSE;
+                }
+
+                std::wstring newExt = fs::path(newName).extension().wstring();
+                if (newExt.empty())
+                    newName += oldExt;
+                else if (_wcsicmp(newExt.c_str(), oldExt.c_str()) != 0)
+                {
+                    MessageBoxW(g_main, L"拡張子は変更できません。", L"ImageEdit",
+                                MB_ICONWARNING);
+                    return FALSE;
+                }
+
+                fs::path np = op.parent_path() / newName;
+                std::wstring newPath = np.wstring();
+
+                if (wcscmp(oldPath.c_str(), newPath.c_str()) != 0)
+                {
+                    if (_wcsicmp(oldPath.c_str(), newPath.c_str()) != 0 &&
+                        GetFileAttributesW(newPath.c_str()) !=
+                            INVALID_FILE_ATTRIBUTES)
+                    {
+                        MessageBoxW(g_main,
+                                    L"同じ名前のファイルが既に存在します。",
+                                    L"ImageEdit", MB_ICONWARNING);
+                        return FALSE;
+                    }
+                    if (!MoveFileW(oldPath.c_str(), newPath.c_str()))
+                    {
+                        MessageBoxW(g_main, L"名前を変更できませんでした。",
+                                    L"ImageEdit", MB_ICONERROR);
+                        return FALSE;
+                    }
+                    g_items[idx].path = newPath;
+                    g_items[idx].created = GetCreationTime(newPath);
+                    SaveState();
+                    if (g_sortMode == 0 || g_sortMode == 1)
+                        PostMessageW(hwnd, WM_APP_RESORT, 0, 0);
+                }
+
+                g_renameText = newName;
+                di->item.pszText = const_cast<LPWSTR>(g_renameText.c_str());
+                return TRUE;
+            }
             case LVN_GETINFOTIP:
             {
                 auto tip = (NMLVGETINFOTIP*)lParam;
@@ -929,6 +1133,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_APP_THUMBS_CHANGED:
         MainRefresh();
+        return 0;
+
+    case WM_APP_RESORT:
+        ApplySort();
         return 0;
 
     case WM_SETFOCUS:
