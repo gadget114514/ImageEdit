@@ -34,7 +34,9 @@ namespace {
 enum {
     IDC_BTN_OPEN = 2001, IDC_BTN_ADD, IDC_BTN_EDIT, IDC_BTN_DEL,
     IDC_BTN_REFRESH, IDC_BTN_RELOAD, IDC_LIST, IDC_CMB_SORT = 2010,
-    IDM_EXIT = 2100, IDM_EDIT, IDM_REVEAL, IDM_REMOVE, IDM_RENAME
+    IDC_TAB = 2020,
+    IDM_EXIT = 2100, IDM_EDIT, IDM_REVEAL, IDM_REMOVE, IDM_RENAME,
+    IDM_CLOSE_TAB
 };
 
 struct ListItem {
@@ -45,10 +47,17 @@ struct ListItem {
     int imageIndex = -1;
 };
 
+struct FolderTab {
+    std::wstring path;
+    std::vector<ListItem> items;
+    HIMAGELIST himl = nullptr;
+};
+
 HINSTANCE g_inst = nullptr;
 HWND g_main = nullptr;
 HWND g_list = nullptr;
 HWND g_status = nullptr;
+HWND g_tab = nullptr;
 HWND g_btnOpen = nullptr, g_btnAdd = nullptr, g_btnEdit = nullptr;
 HWND g_btnDel = nullptr, g_btnRefresh = nullptr, g_btnReload = nullptr;
 HWND g_lblSort = nullptr, g_cmbSort = nullptr;
@@ -59,7 +68,8 @@ UINT g_dpi = 96;
 int g_thumb = 160;
 int g_sortMode = 0;
 std::vector<ListItem> g_items;
-std::vector<std::wstring> g_folders;
+std::vector<FolderTab> g_tabs;
+int g_activeTab = -1;
 std::wstring g_lastFolder;
 std::wstring g_renameText;
 
@@ -67,7 +77,22 @@ const wchar_t* kRegPath = L"Software\\ImageEdit";
 
 int Sc(int v) { return MulDiv(v, (int)g_dpi, 96); }
 
+void DbgLog(const wchar_t* msg)
+{
+    HANDLE h = CreateFileW(
+        L"C:\\Users\\bluen\\AppData\\Local\\Temp\\ImageEditSmoke\\debug.log",
+        FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    DWORD w = 0;
+    WriteFile(h, msg, (DWORD)(wcslen(msg) * sizeof(wchar_t)), &w, nullptr);
+    WriteFile(h, L"\r\n", 4, &w, nullptr);
+    CloseHandle(h);
+}
+
 void ApplySort();
+void SetStatusCount();
 
 unsigned long long GetCreationTime(const std::wstring& path)
 {
@@ -92,16 +117,10 @@ bool SamePath(const std::wstring& a, const std::wstring& b)
 
 std::wstring CurrentImageFolder()
 {
+    if (g_activeTab >= 0 && g_activeTab < (int)g_tabs.size())
+        return g_tabs[g_activeTab].path;
     if (!g_lastFolder.empty())
         return g_lastFolder;
-    if (!g_folders.empty())
-        return g_folders.front();
-    for (auto it = g_items.rbegin(); it != g_items.rend(); ++it)
-    {
-        std::wstring parent = fs::path(it->path).parent_path().wstring();
-        if (!parent.empty())
-            return parent;
-    }
     return L"";
 }
 
@@ -141,33 +160,21 @@ int FindItemByPath(const std::wstring& path)
     return -1;
 }
 
-int FindFolder(const std::wstring& dir)
+std::wstring NormalizeDir(const std::wstring& dir)
 {
-    for (size_t i = 0; i < g_folders.size(); i++)
-        if (_wcsicmp(g_folders[i].c_str(), dir.c_str()) == 0)
-            return (int)i;
-    return -1;
-}
-
-void AddFolderToList(const std::wstring& dir)
-{
-    if (dir.empty())
-        return;
     std::wstring d = dir;
     while (d.size() > 3 && (d.back() == L'\\' || d.back() == L'/'))
         d.pop_back();
-    if (FindFolder(d) < 0)
-        g_folders.push_back(d);
+    return d;
 }
 
-void EnsureFoldersFromItems()
+int FindFolder(const std::wstring& dir)
 {
-    for (const ListItem& it : g_items)
-    {
-        std::wstring parent = fs::path(it.path).parent_path().wstring();
-        if (!parent.empty())
-            AddFolderToList(parent);
-    }
+    std::wstring d = NormalizeDir(dir);
+    for (size_t i = 0; i < g_tabs.size(); i++)
+        if (_wcsicmp(g_tabs[i].path.c_str(), d.c_str()) == 0)
+            return (int)i;
+    return -1;
 }
 
 std::wstring RegGetString(const wchar_t* name)
@@ -221,10 +228,17 @@ void SaveState()
                    (DWORD)((g_lastFolder.size() + 1) * sizeof(wchar_t)));
 
     std::vector<wchar_t> multi;
-    for (const ListItem& it : g_items)
+    for (size_t i = 0; i < g_tabs.size(); i++)
     {
-        multi.insert(multi.end(), it.path.begin(), it.path.end());
-        multi.push_back(L'\0');
+        const std::vector<ListItem>& items =
+            (g_activeTab == (int)i) ? g_items : g_tabs[i].items;
+        std::wstring prefix = std::to_wstring(i) + L"\t";
+        for (const ListItem& it : items)
+        {
+            multi.insert(multi.end(), prefix.begin(), prefix.end());
+            multi.insert(multi.end(), it.path.begin(), it.path.end());
+            multi.push_back(L'\0');
+        }
     }
     multi.push_back(L'\0');
     RegSetValueExW(key, L"Items", 0, REG_MULTI_SZ,
@@ -232,9 +246,9 @@ void SaveState()
                    (DWORD)(multi.size() * sizeof(wchar_t)));
 
     std::vector<wchar_t> folders;
-    for (const std::wstring& d : g_folders)
+    for (const FolderTab& t : g_tabs)
     {
-        folders.insert(folders.end(), d.begin(), d.end());
+        folders.insert(folders.end(), t.path.begin(), t.path.end());
         folders.push_back(L'\0');
     }
     folders.push_back(L'\0');
@@ -245,7 +259,118 @@ void SaveState()
     DWORD sortMode = (DWORD)g_sortMode;
     RegSetValueExW(key, L"SortMode", 0, REG_DWORD,
                    (const BYTE*)&sortMode, sizeof(sortMode));
+
+    DWORD activeTab = (DWORD)(g_activeTab < 0 ? 0 : g_activeTab);
+    RegSetValueExW(key, L"ActiveTab", 0, REG_DWORD,
+                   (const BYTE*)&activeTab, sizeof(activeTab));
     RegCloseKey(key);
+}
+
+std::wstring TabLabel(const std::wstring& dir)
+{
+    std::wstring label = fs::path(dir).filename().wstring();
+    if (label.empty())
+        label = dir;
+    if (label.size() > 28)
+        label = label.substr(0, 27) + L"\u2026";
+    return label;
+}
+
+void CreateTab(const std::wstring& dir)
+{
+    FolderTab tab;
+    tab.path = NormalizeDir(dir);
+    tab.himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
+    g_tabs.push_back(std::move(tab));
+
+    std::wstring label = TabLabel(g_tabs.back().path);
+    TCITEMW ti{};
+    ti.mask = TCIF_TEXT;
+    ti.pszText = const_cast<LPWSTR>(label.c_str());
+    TabCtrl_InsertItem(g_tab, (int)g_tabs.size() - 1, &ti);
+}
+
+void ActivateTab(int index)
+{
+    if (index < 0 || index >= (int)g_tabs.size())
+        return;
+    if (index == g_activeTab)
+    {
+        TabCtrl_SetCurSel(g_tab, index);
+        return;
+    }
+
+    if (g_activeTab >= 0)
+    {
+        std::swap(g_items, g_tabs[g_activeTab].items);
+        std::swap(g_himl, g_tabs[g_activeTab].himl);
+    }
+    else
+    {
+        g_items.clear();
+        if (g_himl)
+        {
+            ImageList_Destroy(g_himl);
+            g_himl = nullptr;
+        }
+    }
+
+    g_activeTab = index;
+    std::swap(g_items, g_tabs[index].items);
+    std::swap(g_himl, g_tabs[index].himl);
+    if (!g_himl)
+        g_himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
+    g_lastFolder = g_tabs[index].path;
+    ListView_SetImageList(g_list, g_himl, LVSIL_NORMAL);
+    TabCtrl_SetCurSel(g_tab, index);
+    ApplySort();
+    SaveState();
+}
+
+void CloseTab(int index)
+{
+    if (index < 0 || index >= (int)g_tabs.size())
+        return;
+
+    if (index == g_activeTab)
+    {
+        SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
+        ListView_DeleteAllItems(g_list);
+        g_items.clear();
+        if (g_himl)
+        {
+            ImageList_Destroy(g_himl);
+            g_himl = nullptr;
+        }
+        g_activeTab = -1;
+    }
+    else
+    {
+        if (g_tabs[index].himl)
+            ImageList_Destroy(g_tabs[index].himl);
+        if (index < g_activeTab)
+            g_activeTab--;
+    }
+
+    g_tabs.erase(g_tabs.begin() + index);
+    TabCtrl_DeleteItem(g_tab, index);
+
+    if (g_activeTab < 0 && !g_tabs.empty())
+    {
+        int next = std::min(index, (int)g_tabs.size() - 1);
+        ActivateTab(next);
+    }
+    else if (g_tabs.empty())
+    {
+        SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(g_list, nullptr, TRUE);
+        SetStatusCount();
+        SaveState();
+    }
+    else
+    {
+        SaveState();
+    }
 }
 
 void SetDialogFolder(IFileOpenDialog* dlg, const std::wstring& dir)
@@ -333,31 +458,36 @@ void MainRenameSelected()
     ListView_EditLabel(g_list, pos);
 }
 
-void MainAddFile(const std::wstring& path)
+bool LoadListItem(const std::wstring& path, HIMAGELIST himl, ListItem& item)
 {
-    int exist = FindItemByPath(path);
-    if (exist >= 0)
+    if (!himl || !ImgUtil_IsSupportedFile(path))
     {
-        SelectItemByIndex(exist);
-        return;
+        DbgLog(L"LoadListItem: unsupported or null himl");
+        return false;
     }
-    if (!ImgUtil_IsSupportedFile(path))
-        return;
 
     int w = 0, h = 0;
     double dx = 96, dy = 96;
     if (!ImgUtil_LoadInfo(path, &w, &h, &dx, &dy))
-        return;
+    {
+        DbgLog(L"LoadListItem: LoadInfo failed");
+        return false;
+    }
 
     HBITMAP hbm = ImgUtil_CreateThumbnail(path, g_thumb, g_thumb, nullptr, nullptr);
     if (!hbm)
-        return;
-    int imgIdx = ImageList_Add(g_himl, hbm, nullptr);
+    {
+        DbgLog(L"LoadListItem: thumbnail failed");
+        return false;
+    }
+    int imgIdx = ImageList_Add(himl, hbm, nullptr);
     DeleteObject(hbm);
     if (imgIdx < 0)
-        return;
+    {
+        DbgLog(L"LoadListItem: ImageList_Add failed");
+        return false;
+    }
 
-    ListItem item;
     item.path = path;
     item.width = w;
     item.height = h;
@@ -365,30 +495,69 @@ void MainAddFile(const std::wstring& path)
     item.dpiY = dy;
     item.created = GetCreationTime(path);
     item.imageIndex = imgIdx;
+    return true;
+}
+
+void MainAddFile(const std::wstring& path)
+{
+    wchar_t b[256];
+    swprintf_s(b, L"MainAddFile: active=%d himl=%p %s", g_activeTab,
+               (void*)g_himl, path.c_str());
+    DbgLog(b);
+    if (g_activeTab < 0 || !g_himl)
+        return;
+    int exist = FindItemByPath(path);
+    if (exist >= 0)
+    {
+        SelectItemByIndex(exist);
+        return;
+    }
+
+    ListItem item;
+    if (!LoadListItem(path, g_himl, item))
+    {
+        DbgLog(L"LoadListItem failed");
+        return;
+    }
     g_items.push_back(item);
 
     std::wstring name = FileNameOf(path);
     LVITEMW lvi{};
     lvi.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
     lvi.iItem = ListView_GetItemCount(g_list);
-    lvi.iImage = imgIdx;
+    lvi.iImage = item.imageIndex;
     lvi.pszText = const_cast<LPWSTR>(name.c_str());
     lvi.lParam = (LPARAM)(g_items.size() - 1);
     ListView_InsertItem(g_list, &lvi);
     SetStatusCount();
 }
 
-void MainAddFolder(const std::wstring& dir)
+bool AppendItemToTab(int tabIndex, const std::wstring& path)
 {
-    g_lastFolder = dir;
-    AddFolderToList(dir);
+    if (tabIndex < 0 || tabIndex >= (int)g_tabs.size())
+        return false;
+    FolderTab& tab = g_tabs[tabIndex];
+    for (const ListItem& it : tab.items)
+        if (_wcsicmp(it.path.c_str(), path.c_str()) == 0)
+            return false;
+    if (!tab.himl)
+        tab.himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
+    ListItem item;
+    if (!LoadListItem(path, tab.himl, item))
+        return false;
+    tab.items.push_back(item);
+    return true;
+}
+
+std::vector<std::wstring> EnumerateFolder(const std::wstring& dir)
+{
+    std::vector<std::wstring> files;
     std::wstring pattern = dir + L"\\*";
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE)
-        return;
+        return files;
 
-    std::vector<std::wstring> files;
     do
     {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
@@ -402,13 +571,27 @@ void MainAddFolder(const std::wstring& dir)
     std::sort(files.begin(), files.end(),
               [](const std::wstring& a, const std::wstring& b)
               { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    return files;
+}
 
-    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+void LoadFolderContents(const std::wstring& dir)
+{
+    DbgLog((L"LoadFolderContents: " + dir).c_str());
+    std::vector<std::wstring> files = EnumerateFolder(dir);
+    wchar_t b[128];
+    swprintf_s(b, L"EnumerateFolder: %d files", (int)files.size());
+    DbgLog(b);
     for (const auto& f : files)
         MainAddFile(f);
+    swprintf_s(b, L"After load: %d items", (int)g_items.size());
+    DbgLog(b);
     ApplySort();
-    SetCursor(old);
-    SaveState();
+}
+
+void AppendFolderToTab(int tabIndex, const std::wstring& dir)
+{
+    for (const auto& f : EnumerateFolder(dir))
+        AppendItemToTab(tabIndex, f);
 }
 
 void RebuildList()
@@ -529,20 +712,8 @@ void MainRefresh()
         InvalidateRect(g_list, nullptr, TRUE);
 }
 
-void MainReloadFolders()
+void ClearAllItems()
 {
-    if (g_folders.empty())
-        EnsureFoldersFromItems();
-    if (g_folders.empty())
-    {
-        MessageBoxW(g_main,
-                    L"読み込み済みのフォルダがありません。\n"
-                    L"「イメージフォルダを開く」でフォルダを開いてください。",
-                    L"ImageEdit", MB_ICONINFORMATION);
-        return;
-    }
-
-    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
     SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_list);
     g_items.clear();
@@ -552,20 +723,66 @@ void MainReloadFolders()
         g_himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
         ListView_SetImageList(g_list, g_himl, LVSIL_NORMAL);
     }
+}
 
-    std::vector<std::wstring> folders = g_folders;
-    for (const std::wstring& d : folders)
-    {
-        DWORD attr = GetFileAttributesW(d.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
-            continue;
-        MainAddFolder(d);
-    }
-
+void FinishListUpdate()
+{
     SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_list, nullptr, TRUE);
     SetStatusCount();
     SaveState();
+}
+
+void MainOpenFolder(const std::wstring& dir)
+{
+    std::wstring d = NormalizeDir(dir);
+    DWORD attr = GetFileAttributesW(d.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    int idx = FindFolder(d);
+    if (idx < 0)
+    {
+        CreateTab(d);
+        ActivateTab((int)g_tabs.size() - 1);
+    }
+    else
+    {
+        if (idx != g_activeTab)
+            ActivateTab(idx);
+        ClearAllItems();
+    }
+
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    LoadFolderContents(d);
+    FinishListUpdate();
+    SetCursor(old);
+}
+
+void MainReloadFolders()
+{
+    if (g_activeTab < 0)
+    {
+        MessageBoxW(g_main,
+                    L"読み込み済みのフォルダがありません。\n"
+                    L"「イメージフォルダを開く」でフォルダを開いてください。",
+                    L"ImageEdit", MB_ICONINFORMATION);
+        return;
+    }
+
+    std::wstring dir = g_tabs[g_activeTab].path;
+    DWORD attr = GetFileAttributesW(dir.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        MessageBoxW(g_main, L"フォルダが見つかりません。", L"ImageEdit",
+                    MB_ICONWARNING);
+        return;
+    }
+
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    ClearAllItems();
+    LoadFolderContents(dir);
+    FinishListUpdate();
     SetCursor(old);
 }
 
@@ -695,7 +912,13 @@ void MainLayout(HWND hwnd)
     if (g_cmbSort)
         MoveWindow(g_cmbSort, x, y, Sc(160), Sc(200), TRUE);
 
-    int listTop = y + ch + pad;
+    int tabTop = y + ch + Sc(4);
+    int tabH = Sc(26);
+    if (g_tab)
+        MoveWindow(g_tab, pad, tabTop, std::max(0, (int)rc.right - pad * 2),
+                   tabH, TRUE);
+
+    int listTop = tabTop + tabH + Sc(2);
     MoveWindow(g_list, 0, listTop, rc.right,
                std::max(0, (int)rc.bottom - listTop - statusH), TRUE);
 
@@ -736,6 +959,10 @@ void CreateMainControls(HWND hwnd)
     SendMessageW(g_cmbSort, CB_ADDSTRING, 0, (LPARAM)L"作成日時（古い順）");
     SendMessageW(g_cmbSort, CB_SETCURSEL, g_sortMode, 0);
 
+    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TCS_HOTTRACK,
+        0, 0, 10, 10, hwnd, (HMENU)IDC_TAB, g_inst, nullptr);
+
     g_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_ICON | LVS_AUTOARRANGE |
         LVS_SHOWSELALWAYS | LVS_EDITLABELS,
@@ -753,7 +980,7 @@ void CreateMainControls(HWND hwnd)
 
     HWND controls[] = { g_btnOpen, g_btnAdd, g_btnEdit, g_btnDel,
                         g_btnRefresh, g_btnReload, g_lblSort, g_cmbSort,
-                        g_list, g_status };
+                        g_tab, g_list, g_status };
     for (HWND h : controls)
         SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
 
@@ -768,6 +995,7 @@ void BuildMenu(HWND hwnd)
     AppendMenuW(file, MF_STRING, IDC_BTN_OPEN, L"イメージフォルダを開く(&O)\tCtrl+O");
     AppendMenuW(file, MF_STRING, IDC_BTN_ADD, L"ファイルを追加(&A)\tCtrl+I");
     AppendMenuW(file, MF_STRING, IDC_BTN_RELOAD, L"フォルダを再読込(&L)\tF6");
+    AppendMenuW(file, MF_STRING, IDM_CLOSE_TAB, L"タブを閉じる(&W)\tCtrl+W");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"終了(&X)");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)file, L"ファイル(&F)");
@@ -786,6 +1014,7 @@ void BuildMenu(HWND hwnd)
     ACCEL acc[] = {
         { FVIRTKEY | FCONTROL, 'O', IDC_BTN_OPEN },
         { FVIRTKEY | FCONTROL, 'I', IDC_BTN_ADD },
+        { FVIRTKEY | FCONTROL, 'W', IDM_CLOSE_TAB },
         { FVIRTKEY, VK_F5, IDC_BTN_REFRESH },
         { FVIRTKEY, VK_F6, IDC_BTN_RELOAD },
         { FVIRTKEY, VK_F2, IDM_RENAME },
@@ -862,7 +1091,7 @@ void HandleDrop(HWND hwnd, HDROP drop)
 
     HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
     for (const auto& d : dirs)
-        MainAddFolder(d);
+        MainOpenFolder(d);
 
     int copied = 0;
     int failed = 0;
@@ -952,7 +1181,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                              L"Yu Gothic UI");
         HWND controls[] = { g_btnOpen, g_btnAdd, g_btnEdit, g_btnDel,
                             g_btnRefresh, g_btnReload, g_lblSort, g_cmbSort,
-                            g_list, g_status };
+                            g_tab, g_list, g_status };
         for (HWND h : controls)
             SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
         RECT* pr = (RECT*)lParam;
@@ -984,11 +1213,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             std::wstring dir = PickFolder(hwnd);
             if (!dir.empty())
-                MainAddFolder(dir);
+                MainOpenFolder(dir);
             return 0;
         }
         case IDC_BTN_ADD:
         {
+            if (g_activeTab < 0)
+            {
+                MessageBoxW(g_main,
+                            L"先に「イメージフォルダを開く」でフォルダを開いてください。",
+                            L"ImageEdit", MB_ICONINFORMATION);
+                return 0;
+            }
             for (const auto& f : PickFiles(hwnd))
                 MainAddFile(f);
             ApplySort();
@@ -1019,6 +1255,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_RENAME:
             MainRenameSelected();
             return 0;
+        case IDM_CLOSE_TAB:
+            CloseTab(g_activeTab);
+            return 0;
         case IDM_EXIT:
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;
@@ -1028,6 +1267,39 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_NOTIFY:
     {
         auto nm = (LPNMHDR)lParam;
+        if (nm->idFrom == IDC_TAB)
+        {
+            if (nm->code == TCN_SELCHANGE)
+            {
+                int sel = TabCtrl_GetCurSel(g_tab);
+                if (sel >= 0)
+                    ActivateTab(sel);
+                return 0;
+            }
+            if (nm->code == NM_RCLICK)
+            {
+                POINT pt;
+                GetCursorPos(&pt);
+                POINT cp = pt;
+                ScreenToClient(g_tab, &cp);
+                TCHITTESTINFO ht{};
+                ht.pt = cp;
+                int tabIdx = TabCtrl_HitTest(g_tab, &ht);
+                if (tabIdx >= 0)
+                {
+                    HMENU m = CreatePopupMenu();
+                    AppendMenuW(m, MF_STRING, IDM_CLOSE_TAB, L"タブを閉じる(&W)");
+                    UINT cmd = TrackPopupMenu(m,
+                                              TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                                              pt.x, pt.y, 0, hwnd, nullptr);
+                    DestroyMenu(m);
+                    if (cmd == IDM_CLOSE_TAB)
+                        CloseTab(tabIdx);
+                }
+                return 0;
+            }
+            break;
+        }
         if (nm->idFrom == IDC_LIST)
         {
             switch (nm->code)
@@ -1185,6 +1457,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ImageList_Destroy(g_himl);
             g_himl = nullptr;
         }
+        for (FolderTab& t : g_tabs)
+        {
+            if (t.himl)
+            {
+                ImageList_Destroy(t.himl);
+                t.himl = nullptr;
+            }
+        }
+        g_tabs.clear();
+        g_activeTab = -1;
         if (g_accel)
         {
             DestroyAcceleratorTable(g_accel);
@@ -1219,7 +1501,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES |
+                ICC_TAB_CLASSES;
     InitCommonControlsEx(&icc);
 
     Gdiplus::GdiplusStartupInput gsi;
@@ -1281,9 +1564,28 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
                 continue;
             HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
             if (attr & FILE_ATTRIBUTE_DIRECTORY)
-                MainAddFolder(argv[i]);
+            {
+                MainOpenFolder(argv[i]);
+            }
             else
+            {
+                std::wstring parent =
+                    fs::path(argv[i]).parent_path().wstring();
+                if (!parent.empty())
+                {
+                    int idx = FindFolder(parent);
+                    if (idx >= 0)
+                    {
+                        ActivateTab(idx);
+                    }
+                    else
+                    {
+                        CreateTab(parent);
+                        ActivateTab((int)g_tabs.size() - 1);
+                    }
+                }
                 MainAddFile(argv[i]);
+            }
             SetCursor(old);
             hadArgs = true;
         }
@@ -1292,25 +1594,80 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow)
 
     if (!hadArgs)
     {
-        g_folders = RegGetMultiSz(L"Folders");
         HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-        for (const std::wstring& f : RegGetMultiSz(L"Items"))
-        {
-            DWORD attr = GetFileAttributesW(f.c_str());
-            if (attr != INVALID_FILE_ATTRIBUTES &&
-                !(attr & FILE_ATTRIBUTE_DIRECTORY))
-                MainAddFile(f);
-        }
-        if (g_items.empty() && !g_lastFolder.empty())
+
+        std::vector<std::wstring> folders = RegGetMultiSz(L"Folders");
+        if (folders.empty() && !g_lastFolder.empty())
         {
             DWORD attr = GetFileAttributesW(g_lastFolder.c_str());
             if (attr != INVALID_FILE_ATTRIBUTES &&
                 (attr & FILE_ATTRIBUTE_DIRECTORY))
-                MainAddFolder(g_lastFolder);
+                folders.push_back(g_lastFolder);
         }
-        if (g_folders.empty())
-            EnsureFoldersFromItems();
+
+        for (const std::wstring& f : folders)
+        {
+            DWORD attr = GetFileAttributesW(f.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES ||
+                !(attr & FILE_ATTRIBUTE_DIRECTORY))
+                continue;
+            if (FindFolder(f) < 0)
+                CreateTab(f);
+        }
+
+        std::vector<bool> restored(g_tabs.size(), false);
+        for (const std::wstring& entry : RegGetMultiSz(L"Items"))
+        {
+            int tabIdx = 0;
+            std::wstring path = entry;
+            size_t sep = entry.find(L'\t');
+            if (sep != std::wstring::npos)
+            {
+                bool digits = sep > 0;
+                for (size_t k = 0; k < sep; k++)
+                    if (entry[k] < L'0' || entry[k] > L'9')
+                        digits = false;
+                if (digits)
+                {
+                    for (size_t k = 0; k < sep; k++)
+                        tabIdx = tabIdx * 10 + (int)(entry[k] - L'0');
+                    path = entry.substr(sep + 1);
+                }
+            }
+            if (tabIdx < 0 || tabIdx >= (int)g_tabs.size())
+                continue;
+            DWORD attr = GetFileAttributesW(path.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES ||
+                (attr & FILE_ATTRIBUTE_DIRECTORY))
+                continue;
+            if (AppendItemToTab(tabIdx, path))
+                restored[tabIdx] = true;
+        }
+
+        for (size_t i = 0; i < g_tabs.size(); i++)
+        {
+            if (restored[i])
+                continue;
+            AppendFolderToTab((int)i, g_tabs[i].path);
+        }
+
+        if (!g_tabs.empty())
+        {
+            int active = (int)RegGetDword(L"ActiveTab", 0);
+            if (active < 0 || active >= (int)g_tabs.size())
+                active = 0;
+            ActivateTab(active);
+        }
+
         SetCursor(old);
+    }
+
+    if (g_activeTab < 0)
+    {
+        if (g_himl)
+            ImageList_Destroy(g_himl);
+        g_himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
+        ListView_SetImageList(g_list, g_himl, LVSIL_NORMAL);
     }
 
     ApplySort();
