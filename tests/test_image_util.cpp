@@ -103,11 +103,13 @@ int wmain()
         {
             BITMAP bm{};
             GetObjectW(hbm, sizeof(bm), &bm);
-            Check(bm.bmWidth == 80 && bm.bmHeight == 60,
-                  L"thumbnail size 80x60 (got %dx%d)", bm.bmWidth, bm.bmHeight);
+            Check(bm.bmWidth == 80 && bm.bmHeight == 80,
+                  L"thumbnail size 80x80 (got %dx%d)", bm.bmWidth, bm.bmHeight);
             DWORD* px = (DWORD*)bm.bmBits;
             Check(px != nullptr && (px[0] >> 24) == 255,
                   L"thumbnail alpha opaque");
+            Check(px != nullptr && (px[0] & 0x00FFFFFFu) == 0x00FFFFFFu,
+                  L"thumbnail letterbox is white");
             DeleteObject(hbm);
         }
     }

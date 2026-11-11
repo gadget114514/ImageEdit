@@ -183,16 +183,21 @@ HBITMAP ImgUtil_CreateThumbnail(const std::wstring& path, int boxW, int boxH,
     if (srcW) *srcW = sw;
     if (srcH) *srcH = sh;
 
+    if (boxW <= 0 || boxH <= 0)
+        return nullptr;
+
     double scale = std::min((double)boxW / sw, (double)boxH / sh);
     if (scale > 1.0)
         scale = 1.0;
     int tw = std::max(1, (int)(sw * scale));
     int th = std::max(1, (int)(sh * scale));
+    int ox = (boxW - tw) / 2;
+    int oy = (boxH - th) / 2;
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = tw;
-    bmi.bmiHeader.biHeight = -th;
+    bmi.bmiHeader.biWidth = boxW;
+    bmi.bmiHeader.biHeight = -boxH;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -210,7 +215,7 @@ HBITMAP ImgUtil_CreateThumbnail(const std::wstring& path, int boxW, int boxH,
         g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
         g.SetSmoothingMode(SmoothingModeHighQuality);
         g.Clear(Color(255, 255, 255, 255));
-        g.DrawImage(bmp.get(), Rect(0, 0, tw, th), 0, 0, sw, sh, UnitPixel);
+        g.DrawImage(bmp.get(), Rect(ox, oy, tw, th), 0, 0, sw, sh, UnitPixel);
         g.Flush();
     }
     SelectObject(hdc, old);
@@ -219,7 +224,7 @@ HBITMAP ImgUtil_CreateThumbnail(const std::wstring& path, int boxW, int boxH,
     if (bits)
     {
         DWORD* px = (DWORD*)bits;
-        int n = tw * th;
+        int n = boxW * boxH;
         for (int i = 0; i < n; i++)
             px[i] |= 0xFF000000u;
     }

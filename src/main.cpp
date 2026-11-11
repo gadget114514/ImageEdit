@@ -124,6 +124,19 @@ std::wstring CurrentImageFolder()
     return L"";
 }
 
+void UpdateWindowTitle()
+{
+    if (g_activeTab >= 0 && g_activeTab < (int)g_tabs.size())
+    {
+        std::wstring title = g_tabs[g_activeTab].path + L" - ImageEdit";
+        SetWindowTextW(g_main, title.c_str());
+    }
+    else
+    {
+        SetWindowTextW(g_main, L"ImageEdit - 画像一覧");
+    }
+}
+
 std::wstring UniqueCopyPath(const std::wstring& dir, const std::wstring& srcPath)
 {
     fs::path sp(srcPath);
@@ -323,6 +336,7 @@ void ActivateTab(int index)
     g_lastFolder = g_tabs[index].path;
     ListView_SetImageList(g_list, g_himl, LVSIL_NORMAL);
     TabCtrl_SetCurSel(g_tab, index);
+    UpdateWindowTitle();
     ApplySort();
     SaveState();
 }
@@ -371,6 +385,7 @@ void CloseTab(int index)
     {
         SaveState();
     }
+    UpdateWindowTitle();
 }
 
 void SetDialogFolder(IFileOpenDialog* dlg, const std::wstring& dir)
@@ -717,12 +732,15 @@ void ClearAllItems()
     SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_list);
     g_items.clear();
+    ListView_SetImageList(g_list, nullptr, LVSIL_NORMAL);
     if (g_himl)
     {
         ImageList_Destroy(g_himl);
-        g_himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
-        ListView_SetImageList(g_list, g_himl, LVSIL_NORMAL);
+        g_himl = nullptr;
     }
+    g_himl = ImageList_Create(g_thumb, g_thumb, ILC_COLOR32, 16, 16);
+    ListView_SetImageList(g_list, g_himl, LVSIL_NORMAL);
+    SetStatusCount();
 }
 
 void FinishListUpdate()
@@ -757,6 +775,7 @@ void MainOpenFolder(const std::wstring& dir)
     LoadFolderContents(d);
     FinishListUpdate();
     SetCursor(old);
+    UpdateWindowTitle();
 }
 
 void MainReloadFolders()
@@ -781,9 +800,14 @@ void MainReloadFolders()
 
     HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
     ClearAllItems();
+    SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_list, nullptr, TRUE);
+    UpdateWindow(g_list);
+    SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
     LoadFolderContents(dir);
     FinishListUpdate();
     SetCursor(old);
+    UpdateWindowTitle();
 }
 
 void MainOpenEditor()
